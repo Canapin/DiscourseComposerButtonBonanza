@@ -4,8 +4,8 @@
     "license_url": "https://codeberg.org/centertap/DiscourseComposerButtonBonanza/raw/branch/main/LICENSE",
     "about_url": "https://codeberg.org/centertap/DiscourseComposerButtonBonanza",
     "authors": "Matt Marjanovic",
-    "theme_version": "1.0.0",
-    "minimum_discourse_version": "3.4.0",
+    "theme_version": "2.0.0",
+    "minimum_discourse_version": "3.5.0.beta9",
     "maximum_discourse_version": null,
     "assets": {},
     "color_schemes": {}
