@@ -354,7 +354,7 @@ function parseLayout(api) {
         gearmenu: [],
     };
 
-    const site = api.container.lookup("service:site");
+    const capabilities = api.container.lookup("service:capabilities");
 
     // Until a section is specified, toss buttons in the "extras" toolbar group.
     let currentSection = SECTIONS.EXTRAS;
@@ -373,8 +373,8 @@ function parseLayout(api) {
                    allowMobile} = parseLayoutEntry(entry);
 
             // Skip entry if not wanted on this view.
-            if ((site.desktopView && !allowDesktop) ||
-                (!site.desktopView && !allowMobile)) {
+            if ((!capabilities.isMobileDevice && !allowDesktop) ||
+                (capabilities.isMobileDevice && !allowMobile)) {
                 continue;
             }
 
