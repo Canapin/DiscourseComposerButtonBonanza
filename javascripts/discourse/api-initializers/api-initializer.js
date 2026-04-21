@@ -22,6 +22,7 @@ import {
   parseAttributesString,
   serializeAttributes,
 } from "discourse/lib/wrap-utils";
+import I18n from "discourse-i18n";
 
 // A (hopefully) unique-to-this-component key to use in various identifiers,
 // to avoid clashes/conflicts with other theme components/etc.
@@ -254,7 +255,7 @@ function makeToggleAction(buttonName, groupName, startHidden) {
   document.adoptedStyleSheets.push(stylesheet);
 
   // Now, the actual event handler can just flip the bits.
-  return (toolbarEvent) => {
+  return () => {
     isHidden = !isHidden;
     stylesheet.disabled = !isHidden;
   };
@@ -364,7 +365,7 @@ function addToolbarButton(toolbar, toolbarGroup, buttonSpec, i18nProperties) {
 // Add a button directly to the popup menu under the ⚙️ button.
 //
 function addPopupMenuButton(api, buttonSpec, i18nProperties) {
-  const { icon, titleKey, elementId, action, buttonName, definition } =
+  const { icon, titleKey, action, buttonName, definition } =
     makeCommonButtonOptions(buttonSpec, i18nProperties);
   const hoverKey = setI18nProperty(
     buttonName,
@@ -479,6 +480,7 @@ function parseLayout(api) {
           throw new Error(`Unknown placement type: ${currentSection[0]}`);
       }
     } catch (error) {
+      // eslint-disable-next-line no-console
       console.error(CBBKEY, entry, error);
     }
   }
@@ -536,28 +538,117 @@ export default apiInitializer((api) => {
           }
         }
 
-        // Apply surround.
+        // Wrap an array of inline nodes by round-tripping through markdown.
+        // Returns an array of replacement nodes, or null on parse failure.
+        const wrapInlineNodes = (nodes) => {
+          const frag = pmModel.Fragment.from(nodes);
+          const tempDoc = pmModel.Fragment.from(
+            schema.nodes.paragraph.create(null, frag)
+          );
+          const selectedMarkdown = utils.convertToMarkdown(tempDoc).trim();
+          if (!selectedMarkdown) {
+            return null;
+          }
+          const md = head + selectedMarkdown + tail;
+          const parsed = utils.convertFromMarkdown(md);
+          const first = parsed?.content?.firstChild;
+          if (!first) {
+            return null;
+          }
+          if (
+            first.type.name === "paragraph" &&
+            parsed.content.childCount === 1
+          ) {
+            const result = [];
+            first.content.forEach((n) => result.push(n));
+            return result;
+          }
+          return [first];
+        };
+
+        // Empty selection: insert head+example+tail at cursor.
         const { empty } = state.selection;
-        let markdown;
         if (empty) {
-          markdown = head + (exampleContent || "") + tail;
-        } else {
-          const fragment = state.doc.slice(from, to).content;
-          const selectedMarkdown = utils.convertToMarkdown(fragment);
-          markdown = head + selectedMarkdown + tail;
+          const md = head + (exampleContent || "") + tail;
+          const parsed = utils.convertFromMarkdown(md);
+          const first = parsed?.content?.firstChild;
+          if (!first) {
+            return false;
+          }
+          const contentToInsert =
+            first.type.name === "paragraph" && parsed.content.childCount === 1
+              ? first.content
+              : first;
+          dispatch?.(state.tr.replaceWith(from, to, contentToInsert));
+          return true;
         }
-        const doc = utils.convertFromMarkdown(markdown);
-        const firstChild = doc?.content?.firstChild;
-        if (!firstChild) {
+
+        // Non-empty selection: apply per block, and within each block split at
+        // hard_break nodes so each visual line gets its own wrapper. This avoids
+        // blank lines inside the markup (which create an HTML block instead of
+        // inline HTML) and content loss from cross-paragraph selections.
+        const tr = state.tr;
+        const blockRanges = [];
+        state.doc.nodesBetween(from, to, (node, pos) => {
+          if (node.isBlock && node.inlineContent) {
+            const contentStart = pos + 1;
+            const contentEnd = pos + node.nodeSize - 1;
+            const clipFrom = Math.max(contentStart, from);
+            const clipTo = Math.min(contentEnd, to);
+            if (clipFrom < clipTo) {
+              blockRanges.push({ from: clipFrom, to: clipTo });
+            }
+            return false;
+          }
+        });
+
+        if (blockRanges.length === 0) {
           return false;
         }
-        // When the result is a single paragraph, extract its inline
-        // content so we insert inline nodes rather than a block node.
-        const contentToInsert =
-          firstChild.type.name === "paragraph" && doc.content.childCount === 1
-            ? firstChild.content
-            : firstChild;
-        dispatch?.(state.tr.replaceWith(from, to, contentToInsert));
+
+        blockRanges.reverse().forEach(({ from: bFrom, to: bTo }) => {
+          const mappedFrom = tr.mapping.map(bFrom);
+          const mappedTo = tr.mapping.map(bTo);
+
+          const inlineNodes = [];
+          tr.doc.nodesBetween(mappedFrom, mappedTo, (node) => {
+            if (node.isInline) {
+              inlineNodes.push(node);
+              return false;
+            }
+          });
+          if (!inlineNodes.length) {
+            return;
+          }
+
+          const newNodes = [];
+          let segment = [];
+
+          const flushSegment = () => {
+            if (!segment.length) {
+              return;
+            }
+            newNodes.push(...(wrapInlineNodes(segment) ?? segment));
+            segment = [];
+          };
+
+          for (const node of inlineNodes) {
+            if (
+              schema.nodes.hard_break &&
+              node.type === schema.nodes.hard_break
+            ) {
+              flushSegment();
+              newNodes.push(node);
+            } else {
+              segment.push(node);
+            }
+          }
+          flushSegment();
+
+          tr.replaceWith(mappedFrom, mappedTo, pmModel.Fragment.from(newNodes));
+        });
+
+        dispatch?.(tr);
         return true;
       },
 
@@ -781,6 +872,7 @@ export default apiInitializer((api) => {
     try {
       addPopupMenuButton(api, buttonSpec, i18nProperties);
     } catch (error) {
+      // eslint-disable-next-line no-console
       console.error(CBBKEY, error);
     }
   }
@@ -792,6 +884,7 @@ export default apiInitializer((api) => {
       try {
         addToolbarButton(toolbar, toolbarGroup, buttonSpec, i18nProperties);
       } catch (error) {
+        // eslint-disable-next-line no-console
         console.error(CBBKEY, error);
       }
     }
