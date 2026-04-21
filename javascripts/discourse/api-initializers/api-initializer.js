@@ -18,6 +18,10 @@
 //
 
 import { apiInitializer } from "discourse/lib/api";
+import {
+  parseAttributesString,
+  serializeAttributes,
+} from "discourse/lib/wrap-utils";
 
 // A (hopefully) unique-to-this-component key to use in various identifiers,
 // to avoid clashes/conflicts with other theme components/etc.
@@ -157,6 +161,21 @@ function makeSurroundAction(
         toolbarEvent.commands.cbbToggleMark
       ) {
         toolbarEvent.commands.cbbToggleMark("strikethrough");
+        return;
+      }
+      // Wrap BBcode: create wrap_inline or wrap_block directly.
+      if (
+        head.includes("[wrap") &&
+        tail.includes("[/wrap]") &&
+        toolbarEvent.commands.cbbInsertWrap
+      ) {
+        const match = head.match(/\[wrap([^\]]*)\]/);
+        const attrs = match ? parseAttributesString(match[1]) : {};
+        toolbarEvent.commands.cbbInsertWrap(
+          attrs,
+          lineMode,
+          exampleText || "text"
+        );
         return;
       }
       // Generic inline surround (HTML tags, BBCode, etc.).
@@ -542,9 +561,153 @@ export default apiInitializer((api) => {
         return true;
       },
 
-      // Insert a checklist (task-list) item at the current cursor
-      // position.  applyList throws for unknown exampleKey values, so we
-      // build the list node directly from markdown.
+      // Insert a [wrap] node of the appropriate type for the given lineMode.
+      // multiline: wrap_inline per visual line (hard_break-separated).
+      // inline:    wrap_inline around the selection as a single span.
+      // block:     wrap_block around the selected block-level paragraphs.
+      cbbInsertWrap:
+        (attributes, lineMode, placeholderText) => (state, dispatch) => {
+          const { selection } = state;
+          const { from, to, empty } = selection;
+          const attrs = { data: attributes };
+          const tr = state.tr;
+
+          if (lineMode === "multiline") {
+            const wrapType = schema.nodes.wrap_inline;
+            if (!wrapType) {
+              return false;
+            }
+            if (empty) {
+              tr.replaceWith(
+                from,
+                to,
+                wrapType.create(attrs, schema.text(placeholderText || "text"))
+              );
+              dispatch?.(tr);
+              return true;
+            }
+            // Collect paragraph blocks in the selection, process end→start so
+            // earlier replacements don't shift later positions.
+            const blockPositions = [];
+            state.doc.nodesBetween(from, to, (node, pos) => {
+              if (node.isBlock && node.inlineContent) {
+                blockPositions.push(pos);
+                return false;
+              }
+            });
+            blockPositions.reverse().forEach((pos) => {
+              const mappedPos = tr.mapping.map(pos);
+              const node = tr.doc.nodeAt(mappedPos);
+              if (!node) {
+                return;
+              }
+              const contentStart = mappedPos + 1;
+              const contentEnd = mappedPos + node.nodeSize - 1;
+              const clipFrom = Math.max(contentStart, tr.mapping.map(from));
+              const clipTo = Math.min(contentEnd, tr.mapping.map(to));
+              if (clipFrom >= clipTo) {
+                return;
+              }
+              // Split at hard_break nodes, wrapping each visual line
+              // separately and keeping the hard_break as line separator.
+              const sliced = tr.doc.slice(clipFrom, clipTo).content;
+              const newNodes = [];
+              let segment = [];
+              sliced.forEach((child) => {
+                if (
+                  schema.nodes.hard_break &&
+                  child.type === schema.nodes.hard_break
+                ) {
+                  if (segment.length) {
+                    newNodes.push(
+                      wrapType.create(attrs, pmModel.Fragment.from(segment))
+                    );
+                    segment = [];
+                  }
+                  newNodes.push(child);
+                } else {
+                  segment.push(child);
+                }
+              });
+              if (segment.length) {
+                newNodes.push(
+                  wrapType.create(attrs, pmModel.Fragment.from(segment))
+                );
+              }
+              if (newNodes.length) {
+                tr.replaceWith(clipFrom, clipTo, newNodes);
+              }
+            });
+            dispatch?.(tr);
+            return true;
+          }
+
+          const wrapType =
+            lineMode === "inline"
+              ? schema.nodes.wrap_inline
+              : schema.nodes.wrap_block;
+          if (!wrapType) {
+            return false;
+          }
+
+          if (lineMode === "inline") {
+            const content = empty
+              ? schema.text(placeholderText || "text")
+              : state.doc.slice(from, to).content;
+            tr.replaceWith(from, to, wrapType.create(attrs, content));
+          } else {
+            if (empty) {
+              tr.replaceSelectionWith(
+                wrapType.create(attrs, schema.nodes.paragraph.createAndFill())
+              );
+            } else {
+              // If $to lands at a block boundary (parentOffset===0), nothing
+              // of that block is selected — step back into the previous block.
+              const $toAdj =
+                selection.$to.parentOffset === 0 &&
+                selection.$to.depth > 0 &&
+                selection.$to.pos > from
+                  ? state.doc.resolve(selection.$to.pos - 1)
+                  : selection.$to;
+
+              // When the selection starts right after a hard_break the "line"
+              // lives inside the same paragraph node as preceding content.
+              // Split at that boundary and remove the trailing hard_break so
+              // the wrap opens at the visual line, not the paragraph start.
+              if (
+                selection.$from.nodeBefore?.type === schema.nodes.hard_break
+              ) {
+                tr.split(from);
+                // The hard_break occupies [from-1, from) and positions before
+                // the split point are unaffected by the split step.
+                tr.delete(from - 1, from);
+              }
+
+              // Re-resolve positions through the accumulated mapping.
+              const mappedFrom = tr.mapping.map(from);
+              const mappedToAdj = tr.mapping.map($toAdj.pos);
+              const $resolvedFrom = tr.doc.resolve(mappedFrom);
+              const $resolvedToAdj = tr.doc.resolve(mappedToAdj);
+
+              // sharedDepth+1 would be 2 when the whole selection is inside one
+              // paragraph, pushing before()/after() into text level. Cap at
+              // $resolvedFrom.depth to stay at block level in all cases.
+              const sharedDepth = $resolvedFrom.sharedDepth(mappedToAdj);
+              const wrapDepth = Math.min(sharedDepth + 1, $resolvedFrom.depth);
+              const blockFrom = $resolvedFrom.before(wrapDepth);
+              const blockTo = $resolvedToAdj.after(wrapDepth);
+              tr.replaceWith(
+                blockFrom,
+                blockTo,
+                wrapType.create(attrs, tr.doc.slice(blockFrom, blockTo).content)
+              );
+            }
+          }
+
+          dispatch?.(tr);
+          return true;
+        },
+
       cbbInsertChecklist: () => (state, dispatch) => {
         const { Slice } = pmModel;
         const { TextSelection } = pmState;
@@ -560,6 +723,28 @@ export default apiInitializer((api) => {
         return true;
       },
     }),
+
+    // Override to suppress the paragraph closeBlock \n\n that the default
+    // serializer emits after each child, which would produce blank lines
+    // between paragraphs and before [/wrap].
+    serializeNode: {
+      wrap_block(state, node) {
+        const attrs = serializeAttributes(node.attrs?.data || {});
+        state.write(`[wrap${attrs}]\n`);
+        node.forEach((child, _, index) => {
+          if (index > 0) {
+            state.write("\n");
+          }
+          if (child.type.name === "paragraph") {
+            state.renderInline(child);
+          } else {
+            state.render(child, node, index);
+          }
+        });
+        state.write("\n[/wrap]");
+        state.closeBlock(node);
+      },
+    },
   });
 
   // Create a container for our i18n key/value pairs...
