@@ -769,22 +769,75 @@ export default apiInitializer((api) => {
         },
 
       cbbInsertChecklist: () => (state, dispatch) => {
-        const doc = utils.convertFromMarkdown("* [ ] checklist item");
-        const listNode = doc?.content?.firstChild;
+        const { empty } = state.selection;
+
+        if (empty) {
+          const doc = utils.convertFromMarkdown("* [ ] checklist item");
+          const listNode = doc?.content?.firstChild;
+          if (!listNode) {
+            return false;
+          }
+          const { $from } = state.selection;
+          const depth = $from.depth > 0 ? $from.depth : 1;
+          const blockNode = $from.node(depth);
+          const blockStart = $from.before(depth);
+          const blockEnd = $from.after(depth);
+          let tr;
+          if (blockNode.content.size === 0) {
+            tr = state.tr.replaceWith(blockStart, blockEnd, listNode);
+          } else {
+            tr = state.tr.insert(blockEnd, listNode);
+          }
+          dispatch?.(tr);
+          return true;
+        }
+
+        // Non-empty selection: convert each selected paragraph (and each
+        // hard_break-separated line within it) into a checklist item.
+        const { from, to } = state.selection;
+        const blocks = [];
+        state.doc.nodesBetween(from, to, (node, pos) => {
+          if (node.isBlock && node.inlineContent) {
+            blocks.push({ node, pos });
+            return false;
+          }
+        });
+
+        if (!blocks.length) {
+          return false;
+        }
+
+        const mdLines = [];
+        blocks.forEach(({ node }) => {
+          const frag = pmModel.Fragment.from(
+            schema.nodes.paragraph.create(null, node.content)
+          );
+          utils
+            .convertToMarkdown(frag)
+            .trim()
+            .split("\n")
+            .forEach((line) => {
+              if (line.trim()) {
+                mdLines.push("* [ ] " + line);
+              }
+            });
+        });
+
+        if (!mdLines.length) {
+          return false;
+        }
+
+        const listDoc = utils.convertFromMarkdown(mdLines.join("\n"));
+        const listNode = listDoc?.content?.firstChild;
         if (!listNode) {
           return false;
         }
-        const { $from } = state.selection;
-        const depth = $from.depth > 0 ? $from.depth : 1;
-        const blockNode = $from.node(depth);
-        const blockStart = $from.before(depth);
-        const blockEnd = $from.after(depth);
-        let tr;
-        if (blockNode.content.size === 0) {
-          tr = state.tr.replaceWith(blockStart, blockEnd, listNode);
-        } else {
-          tr = state.tr.insert(blockEnd, listNode);
-        }
+
+        const replaceFrom = blocks[0].pos;
+        const replaceTo =
+          blocks[blocks.length - 1].pos +
+          blocks[blocks.length - 1].node.nodeSize;
+        const tr = state.tr.replaceWith(replaceFrom, replaceTo, listNode);
         dispatch?.(tr);
         return true;
       },
