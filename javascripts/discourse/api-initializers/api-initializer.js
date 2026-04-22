@@ -181,7 +181,12 @@ function makeSurroundAction(
       }
       // Generic inline surround (HTML tags, BBCode, etc.).
       if (toolbarEvent.commands.cbbApplySurround) {
-        toolbarEvent.commands.cbbApplySurround(head, tail, exampleText || "");
+        toolbarEvent.commands.cbbApplySurround(
+          head,
+          tail,
+          exampleText || "",
+          lineMode
+        );
         return;
       }
     }
@@ -516,202 +521,208 @@ export default apiInitializer((api) => {
       // that is already wrapped in head+tail, the wrapper is stripped instead
       // of being doubled. For html tags, also toggles off when the cursor is
       // inside a matching html_inline node.
-      cbbApplySurround: (head, tail, exampleContent) => (state, dispatch) => {
-        const { from, to } = state.selection;
+      cbbApplySurround:
+        (head, tail, exampleContent, lineMode) => (state, dispatch) => {
+          const { from, to } = state.selection;
 
-        // Toggle off if the selection start is inside a matching html_inline.
-        const htmlTagMatch = /^<([a-z][a-z0-9-]*)>$/i.exec(head);
-        if (htmlTagMatch && schema.nodes.html_inline) {
-          const tag = htmlTagMatch[1].toLowerCase();
-          const $from = state.selection.$from;
-          for (let depth = $from.depth; depth >= 0; depth--) {
-            const node = $from.node(depth);
-            if (
-              node.type === schema.nodes.html_inline &&
-              node.attrs.tag === tag
-            ) {
-              const pos = $from.before(depth);
-              dispatch?.(
-                state.tr.replaceWith(pos, pos + node.nodeSize, node.content)
-              );
-              return true;
-            }
-          }
-        }
-
-        // Wrap an array of inline nodes by round-tripping through markdown.
-        // Returns an array of replacement nodes, or null on parse failure.
-        // If the content is already wrapped in head+tail, unwraps instead.
-        const wrapInlineNodes = (nodes) => {
-          const frag = pmModel.Fragment.from(nodes);
-          const tempDoc = pmModel.Fragment.from(
-            schema.nodes.paragraph.create(null, frag)
-          );
-          const selectedMarkdown = utils.convertToMarkdown(tempDoc).trim();
-          if (!selectedMarkdown) {
-            return null;
-          }
-
-          // Toggle-off: if already wrapped, strip the wrapper.
-          if (
-            selectedMarkdown.startsWith(head) &&
-            selectedMarkdown.endsWith(tail) &&
-            selectedMarkdown.length > head.length + tail.length
-          ) {
-            const inner = selectedMarkdown.slice(
-              head.length,
-              selectedMarkdown.length - tail.length
-            );
-            const unwrapped = utils.convertFromMarkdown(inner);
-            const unwrappedFirst = unwrapped?.content?.firstChild;
-            if (
-              unwrappedFirst?.type.name === "paragraph" &&
-              unwrapped.content.childCount === 1
-            ) {
-              const result = [];
-              unwrappedFirst.content.forEach((n) => result.push(n));
-              return result.length ? result : null;
-            }
-          }
-
-          const md = head + selectedMarkdown + tail;
-          const parsed = utils.convertFromMarkdown(md);
-          const first = parsed?.content?.firstChild;
-          if (!first) {
-            return null;
-          }
-          if (
-            first.type.name === "paragraph" &&
-            parsed.content.childCount === 1
-          ) {
-            const result = [];
-            first.content.forEach((n) => result.push(n));
-            return result;
-          }
-          return [first];
-        };
-
-        // Empty selection: insert head+example+tail at cursor.
-        const { empty } = state.selection;
-        if (empty) {
-          const md = head + (exampleContent || "") + tail;
-          const parsed = utils.convertFromMarkdown(md);
-          const first = parsed?.content?.firstChild;
-          if (!first) {
-            return false;
-          }
-          const contentToInsert =
-            first.type.name === "paragraph" && parsed.content.childCount === 1
-              ? first.content
-              : first;
-          dispatch?.(state.tr.replaceWith(from, to, contentToInsert));
-          return true;
-        }
-
-        // Non-empty selection: apply per block, and within each block split at
-        // hard_break nodes so each visual line gets its own wrapper. This avoids
-        // blank lines inside the markup (which create an HTML block instead of
-        // inline HTML) and content loss from cross-paragraph selections.
-        const tr = state.tr;
-        const blockRanges = [];
-        state.doc.nodesBetween(from, to, (node, pos) => {
-          if (node.isBlock && node.inlineContent) {
-            const contentStart = pos + 1;
-            const contentEnd = pos + node.nodeSize - 1;
-            const clipFrom = Math.max(contentStart, from);
-            const clipTo = Math.min(contentEnd, to);
-            if (clipFrom < clipTo) {
-              blockRanges.push({ from: clipFrom, to: clipTo });
-            }
-            return false;
-          }
-        });
-
-        if (blockRanges.length === 0) {
-          return false;
-        }
-
-        blockRanges.reverse().forEach(({ from: bFrom, to: bTo }) => {
-          const mappedFrom = tr.mapping.map(bFrom);
-          const mappedTo = tr.mapping.map(bTo);
-
-          // Toggle-off: if the range falls inside an html_inline whose tag
-          // matches head (e.g. selection is inside <mark>…</mark>), unwrap
-          // the whole html_inline instead of wrapping again.
-          const toggleTag = htmlTagMatch?.[1].toLowerCase();
-          if (toggleTag && schema.nodes.html_inline) {
-            const $mf = tr.doc.resolve(mappedFrom);
-            for (let d = $mf.depth; d > 0; d--) {
-              const anc = $mf.node(d);
+          // Toggle off if the selection start is inside a matching html_inline.
+          const htmlTagMatch = /^<([a-z][a-z0-9-]*)>$/i.exec(head);
+          if (htmlTagMatch && schema.nodes.html_inline) {
+            const tag = htmlTagMatch[1].toLowerCase();
+            const $from = state.selection.$from;
+            for (let depth = $from.depth; depth >= 0; depth--) {
+              const node = $from.node(depth);
               if (
-                anc.type === schema.nodes.html_inline &&
-                anc.attrs.tag === toggleTag
+                node.type === schema.nodes.html_inline &&
+                node.attrs.tag === tag
               ) {
-                const ancStart = $mf.before(d);
-                if (mappedTo <= ancStart + anc.nodeSize) {
-                  tr.replaceWith(
-                    ancStart,
-                    ancStart + anc.nodeSize,
-                    anc.content
-                  );
-                  return;
-                }
-                break;
+                const pos = $from.before(depth);
+                dispatch?.(
+                  state.tr.replaceWith(pos, pos + node.nodeSize, node.content)
+                );
+                return true;
               }
             }
           }
 
-          const inlineNodes = [];
-          tr.doc
-            .slice(mappedFrom, mappedTo)
-            .content.forEach((n) => inlineNodes.push(n));
-          if (!inlineNodes.length) {
-            return;
-          }
-
-          // Also toggle-off when the slice itself is a single matching
-          // html_inline (selection spans from outside the node).
-          if (
-            toggleTag &&
-            schema.nodes.html_inline &&
-            inlineNodes.length === 1 &&
-            inlineNodes[0].type === schema.nodes.html_inline &&
-            inlineNodes[0].attrs.tag === toggleTag
-          ) {
-            tr.replaceWith(mappedFrom, mappedTo, inlineNodes[0].content);
-            return;
-          }
-
-          const newNodes = [];
-          let segment = [];
-
-          const flushSegment = () => {
-            if (!segment.length) {
-              return;
+          // Wrap an array of inline nodes by round-tripping through markdown.
+          // Returns an array of replacement nodes, or null on parse failure.
+          // If the content is already wrapped in head+tail, unwraps instead.
+          const wrapInlineNodes = (nodes) => {
+            const frag = pmModel.Fragment.from(nodes);
+            const tempDoc = pmModel.Fragment.from(
+              schema.nodes.paragraph.create(null, frag)
+            );
+            const selectedMarkdown = utils.convertToMarkdown(tempDoc).trim();
+            if (!selectedMarkdown) {
+              return null;
             }
-            newNodes.push(...(wrapInlineNodes(segment) ?? segment));
-            segment = [];
+
+            // Toggle-off: if already wrapped, strip the wrapper.
+            if (
+              selectedMarkdown.startsWith(head) &&
+              selectedMarkdown.endsWith(tail) &&
+              selectedMarkdown.length > head.length + tail.length
+            ) {
+              const inner = selectedMarkdown.slice(
+                head.length,
+                selectedMarkdown.length - tail.length
+              );
+              const unwrapped = utils.convertFromMarkdown(inner);
+              const unwrappedFirst = unwrapped?.content?.firstChild;
+              if (
+                unwrappedFirst?.type.name === "paragraph" &&
+                unwrapped.content.childCount === 1
+              ) {
+                const result = [];
+                unwrappedFirst.content.forEach((n) => result.push(n));
+                return result.length ? result : null;
+              }
+            }
+
+            const md = head + selectedMarkdown + tail;
+            const parsed = utils.convertFromMarkdown(md);
+            const first = parsed?.content?.firstChild;
+            if (!first) {
+              return null;
+            }
+            if (
+              first.type.name === "paragraph" &&
+              parsed.content.childCount === 1
+            ) {
+              const result = [];
+              first.content.forEach((n) => result.push(n));
+              return result;
+            }
+            return [first];
           };
 
-          for (const node of inlineNodes) {
-            if (
-              schema.nodes.hard_break &&
-              node.type === schema.nodes.hard_break
-            ) {
-              flushSegment();
-              newNodes.push(node);
-            } else {
-              segment.push(node);
+          // Empty selection: insert head+example+tail at cursor.
+          const { empty } = state.selection;
+          if (empty) {
+            const md = head + (exampleContent || "") + tail;
+            const parsed = utils.convertFromMarkdown(md);
+            const first = parsed?.content?.firstChild;
+            if (!first) {
+              return false;
             }
+            const contentToInsert =
+              first.type.name === "paragraph" && parsed.content.childCount === 1
+                ? first.content
+                : first;
+            dispatch?.(state.tr.replaceWith(from, to, contentToInsert));
+            return true;
           }
-          flushSegment();
 
-          tr.replaceWith(mappedFrom, mappedTo, pmModel.Fragment.from(newNodes));
-        });
+          // Non-empty selection: apply per block, and within each block split at
+          // hard_break nodes so each visual line gets its own wrapper. This avoids
+          // blank lines inside the markup (which create an HTML block instead of
+          // inline HTML) and content loss from cross-paragraph selections.
+          const tr = state.tr;
+          const blockRanges = [];
+          state.doc.nodesBetween(from, to, (node, pos) => {
+            if (node.isBlock && node.inlineContent) {
+              const contentStart = pos + 1;
+              const contentEnd = pos + node.nodeSize - 1;
+              const clipFrom = Math.max(contentStart, from);
+              const clipTo = Math.min(contentEnd, to);
+              if (clipFrom < clipTo) {
+                blockRanges.push({ from: clipFrom, to: clipTo });
+              }
+              return false;
+            }
+          });
 
-        dispatch?.(tr);
-        return true;
-      },
+          if (blockRanges.length === 0) {
+            return false;
+          }
+
+          blockRanges.reverse().forEach(({ from: bFrom, to: bTo }) => {
+            const mappedFrom = tr.mapping.map(bFrom);
+            const mappedTo = tr.mapping.map(bTo);
+
+            // Toggle-off: if the range falls inside an html_inline whose tag
+            // matches head (e.g. selection is inside <mark>…</mark>), unwrap
+            // the whole html_inline instead of wrapping again.
+            const toggleTag = htmlTagMatch?.[1].toLowerCase();
+            if (toggleTag && schema.nodes.html_inline) {
+              const $mf = tr.doc.resolve(mappedFrom);
+              for (let d = $mf.depth; d > 0; d--) {
+                const anc = $mf.node(d);
+                if (
+                  anc.type === schema.nodes.html_inline &&
+                  anc.attrs.tag === toggleTag
+                ) {
+                  const ancStart = $mf.before(d);
+                  if (mappedTo <= ancStart + anc.nodeSize) {
+                    tr.replaceWith(
+                      ancStart,
+                      ancStart + anc.nodeSize,
+                      anc.content
+                    );
+                    return;
+                  }
+                  break;
+                }
+              }
+            }
+
+            const inlineNodes = [];
+            tr.doc
+              .slice(mappedFrom, mappedTo)
+              .content.forEach((n) => inlineNodes.push(n));
+            if (!inlineNodes.length) {
+              return;
+            }
+
+            // Also toggle-off when the slice itself is a single matching
+            // html_inline (selection spans from outside the node).
+            if (
+              toggleTag &&
+              schema.nodes.html_inline &&
+              inlineNodes.length === 1 &&
+              inlineNodes[0].type === schema.nodes.html_inline &&
+              inlineNodes[0].attrs.tag === toggleTag
+            ) {
+              tr.replaceWith(mappedFrom, mappedTo, inlineNodes[0].content);
+              return;
+            }
+
+            const newNodes = [];
+            let segment = [];
+
+            const flushSegment = () => {
+              if (!segment.length) {
+                return;
+              }
+              newNodes.push(...(wrapInlineNodes(segment) ?? segment));
+              segment = [];
+            };
+
+            for (const node of inlineNodes) {
+              if (
+                lineMode !== "inline" &&
+                schema.nodes.hard_break &&
+                node.type === schema.nodes.hard_break
+              ) {
+                flushSegment();
+                newNodes.push(node);
+              } else {
+                segment.push(node);
+              }
+            }
+            flushSegment();
+
+            tr.replaceWith(
+              mappedFrom,
+              mappedTo,
+              pmModel.Fragment.from(newNodes)
+            );
+          });
+
+          dispatch?.(tr);
+          return true;
+        },
 
       // Insert a [wrap] node of the appropriate type for the given lineMode.
       // multiline: wrap_inline per visual line (hard_break-separated).
