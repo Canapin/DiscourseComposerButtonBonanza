@@ -618,6 +618,20 @@ export default apiInitializer((api) => {
             return;
           }
 
+          // Toggle-off: if the range is exactly one matching html_inline,
+          // unwrap it instead of adding another layer.
+          const toggleTag = htmlTagMatch?.[1].toLowerCase();
+          if (
+            toggleTag &&
+            schema.nodes.html_inline &&
+            inlineNodes.length === 1 &&
+            inlineNodes[0].type === schema.nodes.html_inline &&
+            inlineNodes[0].attrs.tag === toggleTag
+          ) {
+            tr.replaceWith(mappedFrom, mappedTo, inlineNodes[0].content);
+            return;
+          }
+
           const newNodes = [];
           let segment = [];
 
