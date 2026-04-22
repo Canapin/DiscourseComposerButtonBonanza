@@ -496,7 +496,7 @@ export default apiInitializer((api) => {
   // undefined in the legacy textarea editor.  The action callbacks below
   // check for the presence of these commands as the rich-editor detector.
   api.registerRichEditorExtension({
-    commands: ({ schema, pmCommands, utils, pmState, pmModel }) => ({
+    commands: ({ schema, pmCommands, utils, pmModel }) => ({
       // Toggle a named ProseMirror mark (underline, strikethrough).
       cbbToggleMark: (markName) => (state, dispatch) => {
         const mark = schema.marks[markName];
@@ -611,12 +611,9 @@ export default apiInitializer((api) => {
           const mappedTo = tr.mapping.map(bTo);
 
           const inlineNodes = [];
-          tr.doc.nodesBetween(mappedFrom, mappedTo, (node) => {
-            if (node.isInline) {
-              inlineNodes.push(node);
-              return false;
-            }
-          });
+          tr.doc
+            .slice(mappedFrom, mappedTo)
+            .content.forEach((n) => inlineNodes.push(n));
           if (!inlineNodes.length) {
             return;
           }
@@ -752,45 +749,17 @@ export default apiInitializer((api) => {
                 wrapType.create(attrs, schema.nodes.paragraph.createAndFill())
               );
             } else {
-              // If $to lands at a block boundary (parentOffset===0), nothing
-              // of that block is selected — step back into the previous block.
-              const $toAdj =
-                selection.$to.parentOffset === 0 &&
-                selection.$to.depth > 0 &&
-                selection.$to.pos > from
-                  ? state.doc.resolve(selection.$to.pos - 1)
-                  : selection.$to;
-
-              // When the selection starts right after a hard_break the "line"
-              // lives inside the same paragraph node as preceding content.
-              // Split at that boundary and remove the trailing hard_break so
-              // the wrap opens at the visual line, not the paragraph start.
-              if (
-                selection.$from.nodeBefore?.type === schema.nodes.hard_break
-              ) {
-                tr.split(from);
-                // The hard_break occupies [from-1, from) and positions before
-                // the split point are unaffected by the split step.
-                tr.delete(from - 1, from);
-              }
-
-              // Re-resolve positions through the accumulated mapping.
-              const mappedFrom = tr.mapping.map(from);
-              const mappedToAdj = tr.mapping.map($toAdj.pos);
-              const $resolvedFrom = tr.doc.resolve(mappedFrom);
-              const $resolvedToAdj = tr.doc.resolve(mappedToAdj);
-
-              // sharedDepth+1 would be 2 when the whole selection is inside one
-              // paragraph, pushing before()/after() into text level. Cap at
-              // $resolvedFrom.depth to stay at block level in all cases.
-              const sharedDepth = $resolvedFrom.sharedDepth(mappedToAdj);
-              const wrapDepth = Math.min(sharedDepth + 1, $resolvedFrom.depth);
-              const blockFrom = $resolvedFrom.before(wrapDepth);
-              const blockTo = $resolvedToAdj.after(wrapDepth);
+              const $from = selection.$from;
+              const $to = selection.$to;
+              const blockFrom = $from.before($from.depth);
+              const blockTo = $to.after($to.depth);
               tr.replaceWith(
                 blockFrom,
                 blockTo,
-                wrapType.create(attrs, tr.doc.slice(blockFrom, blockTo).content)
+                wrapType.create(
+                  attrs,
+                  state.doc.slice(blockFrom, blockTo).content
+                )
               );
             }
           }
@@ -800,15 +769,21 @@ export default apiInitializer((api) => {
         },
 
       cbbInsertChecklist: () => (state, dispatch) => {
-        const { Slice } = pmModel;
-        const { TextSelection } = pmState;
         const doc = utils.convertFromMarkdown("* [ ] checklist item");
-        if (!doc?.content?.firstChild) {
+        const listNode = doc?.content?.firstChild;
+        if (!listNode) {
           return false;
         }
-        const tr = state.tr.replaceSelection(new Slice(doc.content, 0, 0));
-        if (!tr.selection.$from.nodeAfter) {
-          tr.setSelection(TextSelection.create(tr.doc, tr.selection.from + 1));
+        const { $from } = state.selection;
+        const depth = $from.depth > 0 ? $from.depth : 1;
+        const blockNode = $from.node(depth);
+        const blockStart = $from.before(depth);
+        const blockEnd = $from.after(depth);
+        let tr;
+        if (blockNode.content.size === 0) {
+          tr = state.tr.replaceWith(blockStart, blockEnd, listNode);
+        } else {
+          tr = state.tr.insert(blockEnd, listNode);
         }
         dispatch?.(tr);
         return true;
