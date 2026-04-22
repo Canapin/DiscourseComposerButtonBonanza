@@ -146,24 +146,6 @@ function makeSurroundAction(
         toolbarEvent.applyHeading(headingMatch[1].length, exampleTextKey);
         return;
       }
-      // Underline and strikethrough are proper marks — use toggleMark so
-      // they can be toggled off as well as on.
-      if (
-        head === "[u]" &&
-        tail === "[/u]" &&
-        toolbarEvent.commands.cbbToggleMark
-      ) {
-        toolbarEvent.commands.cbbToggleMark("underline");
-        return;
-      }
-      if (
-        head === "~~" &&
-        tail === "~~" &&
-        toolbarEvent.commands.cbbToggleMark
-      ) {
-        toolbarEvent.commands.cbbToggleMark("strikethrough");
-        return;
-      }
       // Wrap BBcode: create wrap_inline or wrap_block directly.
       if (
         head.includes("[wrap") &&
@@ -524,6 +506,22 @@ export default apiInitializer((api) => {
       cbbApplySurround:
         (head, tail, exampleContent, lineMode) => (state, dispatch) => {
           const { from, to } = state.selection;
+
+          // Auto-detect if head+tail produce a ProseMirror mark via markdown
+          // round-trip. If so, delegate to toggleMark for proper toggle behavior.
+          const probe = utils.convertFromMarkdown(head + "x" + tail);
+          const probePara = probe?.content?.firstChild;
+          if (
+            probePara?.type.name === "paragraph" &&
+            probe.content.childCount === 1 &&
+            probePara.childCount === 1 &&
+            probePara.firstChild?.isText &&
+            probePara.firstChild.text === "x" &&
+            probePara.firstChild.marks.length === 1
+          ) {
+            const markType = probePara.firstChild.marks[0].type;
+            return pmCommands.toggleMark(markType)(state, dispatch);
+          }
 
           // Toggle off if the selection start is inside a matching html_inline.
           const htmlTagMatch = /^<([a-z][a-z0-9-]*)>$/i.exec(head);
