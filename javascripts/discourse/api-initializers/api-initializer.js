@@ -442,16 +442,14 @@ function parseLayout(api) {
 }
 
 export default apiInitializer((api) => {
-  // Register ProseMirror commands so the toolbar buttons work correctly in
-  // the rich editor.  The commands are keyed with a "cbb" prefix to avoid
-  // collisions with commands from other extensions.
-  //
-  // toolbarEvent.commands is only populated in the rich editor; it is
-  // undefined in the legacy textarea editor.  The action callbacks below
-  // check for the presence of these commands as the rich-editor detector.
+  // ProseMirror commands for the rich editor. toolbarEvent.commands is
+  // undefined in the legacy editor, so its presence is the rich-editor flag.
   api.registerRichEditorExtension({
     commands: ({ schema, pmCommands, utils, pmModel, pmSchemaList }) => {
-      // Hoist cbbInsertWrap as a local so cbbApplySurround can call it.
+      // Hoisted so cbbApplySurround can delegate to it after probe detection.
+      // lineMode: "multiline" → wrap_inline per hard_break-separated line,
+      //           "inline"    → wrap_inline around the whole selection,
+      //           "block"     → wrap_block around selected block(s).
       const insertWrap =
         (attributes, lineMode, placeholderText) => (state, dispatch) => {
           const { selection } = state;
@@ -564,33 +562,19 @@ export default apiInitializer((api) => {
         };
 
       return {
-        // Toggle a named ProseMirror mark (underline, strikethrough).
-        cbbToggleMark: (markName) => (state, dispatch) => {
-          const mark = schema.marks[markName];
-          if (!mark) {
-            return false;
-          }
-          return pmCommands.toggleMark(mark)(state, dispatch);
-        },
-
-        // Generic inline surround: converts head+content+tail as markdown,
-        // extracts the inline ProseMirror nodes, and replaces the current
-        // selection with them.
-        //
-        // Auto-detects the node type produced by head+tail and delegates:
-        // heading → setBlockType, wrap node → insertWrap, ProseMirror mark →
-        // toggleMark, anything else → generic inline round-trip surround.
-        //
-        // Also acts as a toggle for already-wrapped content.
+        // Generic inline surround. Probes head+"x"+tail via markdown to
+        // auto-detect the node type and delegate:
+        //   heading       → setBlockType
+        //   wrap node     → insertWrap (respects lineMode)
+        //   ProseMirror mark → toggleMark
+        //   anything else → round-trip inline surround with toggle-off
         cbbApplySurround:
           (head, tail, exampleContent, lineMode) => (state, dispatch) => {
             const { from, to } = state.selection;
 
-            // Probe what head+"x"+tail produces to auto-detect node type.
             const probe = utils.convertFromMarkdown(head + "x" + tail);
             const probeNode = probe?.content?.firstChild;
 
-            // Auto-detect heading.
             if (
               probeNode?.type.name === "heading" &&
               probe.content.childCount === 1
@@ -600,8 +584,7 @@ export default apiInitializer((api) => {
               })(state, dispatch);
             }
 
-            // Auto-detect wrap node (wrap_inline or wrap_block), including
-            // inline wraps nested inside a paragraph.
+            // Wrap nodes may be block-level or nested inside a paragraph.
             const isWrap = (n) =>
               n?.type === schema.nodes.wrap_inline ||
               n?.type === schema.nodes.wrap_block;
@@ -618,7 +601,6 @@ export default apiInitializer((api) => {
               )(state, dispatch);
             }
 
-            // Auto-detect ProseMirror mark.
             const probePara =
               probeNode?.type.name === "paragraph" ? probeNode : null;
             if (
@@ -629,44 +611,30 @@ export default apiInitializer((api) => {
               probePara.firstChild.text === "x" &&
               probePara.firstChild.marks.length === 1
             ) {
-              const markType = probePara.firstChild.marks[0].type;
-              return pmCommands.toggleMark(markType)(state, dispatch);
-            }
-
-            // Toggle off if the selection start is inside a matching html_inline.
-            const htmlTagMatch = /^<([a-z][a-z0-9-]*)>$/i.exec(head);
-            if (htmlTagMatch && schema.nodes.html_inline) {
-              const tag = htmlTagMatch[1].toLowerCase();
-              const $from = state.selection.$from;
-              for (let depth = $from.depth; depth >= 0; depth--) {
-                const node = $from.node(depth);
-                if (
-                  node.type === schema.nodes.html_inline &&
-                  node.attrs.tag === tag
-                ) {
-                  const pos = $from.before(depth);
-                  dispatch?.(
-                    state.tr.replaceWith(pos, pos + node.nodeSize, node.content)
-                  );
-                  return true;
-                }
-              }
-            }
-
-            // Wrap an array of inline nodes by round-tripping through markdown.
-            // Returns an array of replacement nodes, or null on parse failure.
-            // If the content is already wrapped in head+tail, unwraps instead.
-            const wrapInlineNodes = (nodes) => {
-              const frag = pmModel.Fragment.from(nodes);
-              const tempDoc = pmModel.Fragment.from(
-                schema.nodes.paragraph.create(null, frag)
+              return pmCommands.toggleMark(probePara.firstChild.marks[0].type)(
+                state,
+                dispatch
               );
-              const selectedMarkdown = utils.convertToMarkdown(tempDoc).trim();
+            }
+
+            // Round-trip a node array through markdown, returning replacement
+            // nodes. Strips head+tail if the content is already wrapped (toggle-off).
+            // When the selection is fully inside an html_inline the slice gives
+            // only inner text — the block-loop ancestor walk handles that case.
+            const wrapInlineNodes = (nodes) => {
+              const selectedMarkdown = utils
+                .convertToMarkdown(
+                  pmModel.Fragment.from(
+                    schema.nodes.paragraph.create(
+                      null,
+                      pmModel.Fragment.from(nodes)
+                    )
+                  )
+                )
+                .trim();
               if (!selectedMarkdown) {
                 return null;
               }
-
-              // Toggle-off: if already wrapped, strip the wrapper.
               if (
                 selectedMarkdown.startsWith(head) &&
                 selectedMarkdown.endsWith(tail) &&
@@ -687,9 +655,9 @@ export default apiInitializer((api) => {
                   return result.length ? result : null;
                 }
               }
-
-              const md = head + selectedMarkdown + tail;
-              const parsed = utils.convertFromMarkdown(md);
+              const parsed = utils.convertFromMarkdown(
+                head + selectedMarkdown + tail
+              );
               const first = parsed?.content?.firstChild;
               if (!first) {
                 return null;
@@ -705,36 +673,62 @@ export default apiInitializer((api) => {
               return [first];
             };
 
-            // Empty selection: insert head+example+tail at cursor.
+            // html_inline toggle: only checked for HTML-tag head strings.
+            const htmlTagMatch = /^<([a-z][a-z0-9-]*)>$/i.exec(head);
+            const toggleTag = htmlTagMatch?.[1].toLowerCase();
+
             const { empty } = state.selection;
             if (empty) {
-              const md = head + (exampleContent || "") + tail;
-              const parsed = utils.convertFromMarkdown(md);
+              // Toggle off if cursor is inside a matching html_inline node.
+              if (toggleTag && schema.nodes.html_inline) {
+                const $from = state.selection.$from;
+                for (let depth = $from.depth; depth >= 0; depth--) {
+                  const node = $from.node(depth);
+                  if (
+                    node.type === schema.nodes.html_inline &&
+                    node.attrs.tag === toggleTag
+                  ) {
+                    const pos = $from.before(depth);
+                    dispatch?.(
+                      state.tr.replaceWith(
+                        pos,
+                        pos + node.nodeSize,
+                        node.content
+                      )
+                    );
+                    return true;
+                  }
+                }
+              }
+              const parsed = utils.convertFromMarkdown(
+                head + (exampleContent || "") + tail
+              );
               const first = parsed?.content?.firstChild;
               if (!first) {
                 return false;
               }
-              const contentToInsert =
-                first.type.name === "paragraph" &&
-                parsed.content.childCount === 1
-                  ? first.content
-                  : first;
-              dispatch?.(state.tr.replaceWith(from, to, contentToInsert));
+              dispatch?.(
+                state.tr.replaceWith(
+                  from,
+                  to,
+                  first.type.name === "paragraph" &&
+                    parsed.content.childCount === 1
+                    ? first.content
+                    : first
+                )
+              );
               return true;
             }
 
-            // Non-empty selection: apply per block, and within each block split at
-            // hard_break nodes so each visual line gets its own wrapper. This avoids
-            // blank lines inside the markup (which create an HTML block instead of
-            // inline HTML) and content loss from cross-paragraph selections.
+            // Non-empty: process each block range independently, end→start to
+            // preserve position validity. Split at hard_break boundaries unless
+            // lineMode is "inline" (which keeps breaks inside the wrapper).
             const tr = state.tr;
             const blockRanges = [];
             state.doc.nodesBetween(from, to, (node, pos) => {
               if (node.isBlock && node.inlineContent) {
-                const contentStart = pos + 1;
-                const contentEnd = pos + node.nodeSize - 1;
-                const clipFrom = Math.max(contentStart, from);
-                const clipTo = Math.min(contentEnd, to);
+                const clipFrom = Math.max(pos + 1, from);
+                const clipTo = Math.min(pos + node.nodeSize - 1, to);
                 if (clipFrom < clipTo) {
                   blockRanges.push({ from: clipFrom, to: clipTo });
                 }
@@ -750,10 +744,8 @@ export default apiInitializer((api) => {
               const mappedFrom = tr.mapping.map(bFrom);
               const mappedTo = tr.mapping.map(bTo);
 
-              // Toggle-off: if the range falls inside an html_inline whose tag
-              // matches head (e.g. selection is inside <mark>…</mark>), unwrap
-              // the whole html_inline instead of wrapping again.
-              const toggleTag = htmlTagMatch?.[1].toLowerCase();
+              // When the selection is inside an html_inline (slice gives only
+              // inner text, not the wrapper), unwrap the whole node instead.
               if (toggleTag && schema.nodes.html_inline) {
                 const $mf = tr.doc.resolve(mappedFrom);
                 for (let d = $mf.depth; d > 0; d--) {
@@ -784,22 +776,8 @@ export default apiInitializer((api) => {
                 return;
               }
 
-              // Also toggle-off when the slice itself is a single matching
-              // html_inline (selection spans from outside the node).
-              if (
-                toggleTag &&
-                schema.nodes.html_inline &&
-                inlineNodes.length === 1 &&
-                inlineNodes[0].type === schema.nodes.html_inline &&
-                inlineNodes[0].attrs.tag === toggleTag
-              ) {
-                tr.replaceWith(mappedFrom, mappedTo, inlineNodes[0].content);
-                return;
-              }
-
               const newNodes = [];
               let segment = [];
-
               const flushSegment = () => {
                 if (!segment.length) {
                   return;
@@ -835,9 +813,6 @@ export default apiInitializer((api) => {
 
         cbbInsertWrap: insertWrap,
 
-        // Apply a list prefix (head) in the rich editor. Auto-detects task
-        // lists via markdown round-trip; uses ProseMirror schema-list commands
-        // for standard bullet/ordered lists.
         cbbApplyList: (head, exampleContent) => (state, dispatch) => {
           const probe = utils.convertFromMarkdown(head + "x");
           const probeList = probe?.content?.firstChild;
