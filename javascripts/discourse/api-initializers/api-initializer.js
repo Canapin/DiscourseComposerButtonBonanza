@@ -512,9 +512,10 @@ export default apiInitializer((api) => {
       // convertFromMarkdown → replaceWith(paragraph_node) path that the
       // legacy applySurround uses in the rich editor.
       //
-      // Also acts as a toggle: if the cursor or selection is already inside an
-      // html_inline node whose tag matches the opening tag in `head` (e.g.
-      // "<mark>" → "mark"), the node is unwrapped instead.
+      // Also acts as a toggle: if the selection content serializes to markdown
+      // that is already wrapped in head+tail, the wrapper is stripped instead
+      // of being doubled. For html tags, also toggles off when the cursor is
+      // inside a matching html_inline node.
       cbbApplySurround: (head, tail, exampleContent) => (state, dispatch) => {
         const { from, to } = state.selection;
 
@@ -540,6 +541,7 @@ export default apiInitializer((api) => {
 
         // Wrap an array of inline nodes by round-tripping through markdown.
         // Returns an array of replacement nodes, or null on parse failure.
+        // If the content is already wrapped in head+tail, unwraps instead.
         const wrapInlineNodes = (nodes) => {
           const frag = pmModel.Fragment.from(nodes);
           const tempDoc = pmModel.Fragment.from(
@@ -549,6 +551,29 @@ export default apiInitializer((api) => {
           if (!selectedMarkdown) {
             return null;
           }
+
+          // Toggle-off: if already wrapped, strip the wrapper.
+          if (
+            selectedMarkdown.startsWith(head) &&
+            selectedMarkdown.endsWith(tail) &&
+            selectedMarkdown.length > head.length + tail.length
+          ) {
+            const inner = selectedMarkdown.slice(
+              head.length,
+              selectedMarkdown.length - tail.length
+            );
+            const unwrapped = utils.convertFromMarkdown(inner);
+            const unwrappedFirst = unwrapped?.content?.firstChild;
+            if (
+              unwrappedFirst?.type.name === "paragraph" &&
+              unwrapped.content.childCount === 1
+            ) {
+              const result = [];
+              unwrappedFirst.content.forEach((n) => result.push(n));
+              return result.length ? result : null;
+            }
+          }
+
           const md = head + selectedMarkdown + tail;
           const parsed = utils.convertFromMarkdown(md);
           const first = parsed?.content?.firstChild;
@@ -610,6 +635,32 @@ export default apiInitializer((api) => {
           const mappedFrom = tr.mapping.map(bFrom);
           const mappedTo = tr.mapping.map(bTo);
 
+          // Toggle-off: if the range falls inside an html_inline whose tag
+          // matches head (e.g. selection is inside <mark>…</mark>), unwrap
+          // the whole html_inline instead of wrapping again.
+          const toggleTag = htmlTagMatch?.[1].toLowerCase();
+          if (toggleTag && schema.nodes.html_inline) {
+            const $mf = tr.doc.resolve(mappedFrom);
+            for (let d = $mf.depth; d > 0; d--) {
+              const anc = $mf.node(d);
+              if (
+                anc.type === schema.nodes.html_inline &&
+                anc.attrs.tag === toggleTag
+              ) {
+                const ancStart = $mf.before(d);
+                if (mappedTo <= ancStart + anc.nodeSize) {
+                  tr.replaceWith(
+                    ancStart,
+                    ancStart + anc.nodeSize,
+                    anc.content
+                  );
+                  return;
+                }
+                break;
+              }
+            }
+          }
+
           const inlineNodes = [];
           tr.doc
             .slice(mappedFrom, mappedTo)
@@ -618,9 +669,8 @@ export default apiInitializer((api) => {
             return;
           }
 
-          // Toggle-off: if the range is exactly one matching html_inline,
-          // unwrap it instead of adding another layer.
-          const toggleTag = htmlTagMatch?.[1].toLowerCase();
+          // Also toggle-off when the slice itself is a single matching
+          // html_inline (selection spans from outside the node).
           if (
             toggleTag &&
             schema.nodes.html_inline &&
